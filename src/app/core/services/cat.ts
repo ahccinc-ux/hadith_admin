@@ -10,7 +10,7 @@ export class CatService {
   private readonly baseUrl = '/api/cat';
 
   searchByIndex(indexId: string): Observable<any> {
-    return this.http.post(`${this.baseUrl}/search`, { index_book: indexId });
+    return this.http.post(`${this.baseUrl}/search`, { _index_book: indexId });
   }
 }
 

@@ -9,12 +9,6 @@ function getHadithId(item: any): number {
   return Number(item?._hadithNewOrg?.h_id ?? item?.h_id ?? 0);
 }
 
-// Safe UTF-8 -> Base64 encoder
-function encodeUtf8ToBase64(input: string): string {
-  // Handles Arabic and other non-ASCII characters
-  return btoa(unescape(encodeURIComponent(input)));
-}
-
 @Component({
   selector: 'app-hadith',
   standalone: true,
@@ -22,7 +16,7 @@ function encodeUtf8ToBase64(input: string): string {
   template: `
     <div class="container" dir="rtl">
       <!-- Toast Notification -->
-      <div class="toast" *ngIf="toastMessage()" [class.error]="toastType() === 'error'" [class.success]="toastType() === 'success'" role="status" aria-live="polite">
+      <div class="toast" *ngIf="toastMessage()" [class.error]="toastType() === 'error'" [class.success]="toastType() === 'success'">
         {{ toastMessage() }}
       </div>
       
@@ -41,7 +35,7 @@ function encodeUtf8ToBase64(input: string): string {
       <ng-container *ngIf="!error(); else errorTpl">
         <section *ngIf="loaded(); else loadingTpl">
           <div *ngIf="items().length; else emptyTpl" class="list">
-            <article class="hadith" *ngFor="let item of items(); trackBy: trackByFn" tabindex="0">
+            <article class="hadith" *ngFor="let item of items(); trackBy: trackById" tabindex="0">
               <div class="actions">
                 <button class="btn secondary" *ngIf="!isEditing(getId(item))" (click)="startEdit(item)">
                   تحرير
@@ -292,7 +286,7 @@ export class HadithPage {
   readonly toastType = signal<'success' | 'error' | ''>('');
   
   // Form state
-  drafts: { [key: number]: string } = {};
+  private drafts: { [key: number]: string } = {};
   private editing: { [key: number]: boolean } = {};
   private saving: { [key: number]: boolean } = {};
   private toastTimeout: any = null;
@@ -333,7 +327,7 @@ export class HadithPage {
     return !!this.saving[id];
   }
   
-  trackByFn = (index: number, item: any): number => {
+  trackById(index: number, item: any): number {
     return this.getId(item);
   }
   
@@ -399,14 +393,6 @@ export class HadithPage {
   
   cancelEdit(item: any): void {
     const id = this.getId(item);
-    const current = (this.drafts[id] ?? '').trim();
-    const original = (item?._hadithNewOrg?.matn ?? item?.matn ?? '').trim();
-    if (current && current !== original) {
-      const proceed = confirm('لديك تعديلات غير محفوظة، هل تريد الإلغاء؟');
-      if (!proceed) {
-        return;
-      }
-    }
     delete this.drafts[id];
     delete this.editing[id];
   }
@@ -446,39 +432,21 @@ export class HadithPage {
       this.chapterId(),
       this.babId(),
       id,
-      encodeUtf8ToBase64(raw) // UTF-8 safe base64
+      btoa(unescape(encodeURIComponent(raw))) // Simple base64 encode
     ).subscribe({
       next: (res: any) => {
-        // Clean up editing state regardless of response format
+        // Update with server response
+        const updated = res?.gridData?.[0] || res;
+        if (updated) {
+          this.items.update(items => 
+            items.map(i => this.getId(i) === id ? updated : i)
+          );
+        }
+        
+        // Clean up
         delete this.drafts[id];
         delete this.editing[id];
         delete this.saving[id];
-        
-        // Only update the item if we have valid response data
-        if (res) {
-          this.items.update(items => {
-            return items.map(i => {
-              if (this.getId(i) === id) {
-                // If response has gridData, use the first item, otherwise use the optimistic update
-                const serverItem = res.gridData?.[0] || res;
-                // Preserve the original item structure, only update the matn
-                if (serverItem._hadithNewOrg?.matn || serverItem.matn) {
-                  return serverItem;
-                }
-                // If server response doesn't have the expected structure, keep the optimistic update
-                return {
-                  ...i,
-                  _hadithNewOrg: {
-                    ...(i._hadithNewOrg || {}),
-                    matn: raw
-                  },
-                  matn: raw
-                };
-              }
-              return i;
-            });
-          });
-        }
         
         this.showToast('تم حفظ التعديل بنجاح', 'success');
       },

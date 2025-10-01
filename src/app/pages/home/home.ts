@@ -1,11 +1,22 @@
 import { Component, inject, signal } from '@angular/core';
 import { CommonModule } from '@angular/common';
-import { RouterLink } from '@angular/router';
+import { Router, RouterLink } from '@angular/router';
 import { IndexBook } from '../../core/services/index-book';
+import { CatService } from '../../core/services/cat';
+
+interface Category {
+  id: number;
+  name: string;
+  sort_menu?: number;
+  master_menu?: number;
+  sub_menu?: number;
+  hasSubcategories?: boolean;
+}
 
 @Component({
   selector: 'app-home',
-  imports: [CommonModule, RouterLink],
+  imports: [CommonModule],
+  standalone: true,
   template: `
     <div class="container" dir="rtl">
       <header class="header">
@@ -17,18 +28,37 @@ import { IndexBook } from '../../core/services/index-book';
 
       <ng-container *ngIf="!error(); else errorTpl">
         <section *ngIf="loaded(); else loadingTpl">
+          <!-- Breadcrumb -->
+          <nav *ngIf="breadcrumbs().length > 0" class="breadcrumb">
+            <a (click)="goToLevel()">الرئيسية</a>
+            <span *ngFor="let crumb of breadcrumbs(); let last = last" class="breadcrumb-item">
+              <span class="separator">/</span>
+              <a *ngIf="!last" (click)="goToLevel(crumb.id)">{{ crumb.name }}</a>
+              <span *ngIf="last">{{ crumb.name }}</span>
+            </span>
+          </nav>
+
           <div *ngIf="items().length; else emptyTpl" class="grid">
-            <article class="card" *ngFor="let item of items()" [routerLink]="['/books', item.id]" [queryParams]="{ name: item.name }" tabindex="0">
+            <article 
+              class="card" 
+              *ngFor="let item of items()" 
+              (click)="onItemClick(item)" 
+              (keyup.enter)="onItemClick(item)"
+              tabindex="0"
+              role="button"
+              [attr.aria-label]="'تصفح ' + item.name"
+            >
               <div class="card-inner">
                 <div class="card-face card-front">
                   <div class="name" [title]="item.name">{{ item.name }}</div>
                   <div class="meta">
-                    <span class="badge">معرّف: {{ item.id ?? item.indexBookId ?? '—' }}</span>
+                    <span class="badge" *ngIf="showIds">معرّف: {{ item.id || '—' }}</span>
+                    <span class="badge" *ngIf="item.hasSubcategories">{{ item.hasSubcategories ? 'أقسام فرعية' : 'كتب' }}</span>
                   </div>
                 </div>
                 <div class="card-face card-back">
                   <div class="back-title">{{ item.name }}</div>
-                  <div class="back-meta">اضغط للانتقال إلى الكتب</div>
+                  <div class="back-meta">{{ item.hasSubcategories ? 'اضغط لعرض الأقسام الفرعية' : 'اضغط لعرض الكتب' }}</div>
                 </div>
               </div>
             </article>
@@ -54,6 +84,11 @@ import { IndexBook } from '../../core/services/index-book';
   `,
   styles: `
     .container { padding: 24px; }
+    .breadcrumb { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 20px; padding: 8px 0; font-size: 14px; }
+    .breadcrumb a { color: #3b82f6; cursor: pointer; text-decoration: none; }
+    .breadcrumb a:hover { text-decoration: underline; }
+    .breadcrumb .separator { margin: 0 4px; color: #94a3b8; }
+    .breadcrumb-item { display: flex; align-items: center; }
     .header { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
     .titles { display: flex; flex-direction: column; gap: 4px; }
     h1 { margin: 0; font-size: 22px; color: #347AE2; }
@@ -80,20 +115,141 @@ import { IndexBook } from '../../core/services/index-book';
 })
 export class Home {
   private readonly api = inject(IndexBook);
-  readonly items = signal<any[]>([]);
+  private readonly catService = inject(CatService);
+  private readonly router = inject(Router);
+  
+  readonly items = signal<Category[]>([]);
   readonly error = signal<boolean>(false);
   readonly loaded = signal<boolean>(false);
+  readonly showIds = false; // Set to true to show IDs for debugging
+  
+  // Navigation state
+  private navigationStack: Array<{id: number, name: string, items: Category[]}> = [];
+  readonly currentLevel = signal<number | null>(null);
+  readonly breadcrumbs = signal<Array<{id: number, name: string}>>([]);
 
   constructor() {
+    this.loadMainCategories();
+  }
+
+  private loadMainCategories(): void {
+    this.loaded.set(false);
     this.api.search().subscribe({
       next: res => {
-        const grid = (res?.gridData ?? []).filter((item: any) => item?.master_menu === 0);
-        this.items.set(grid);
+        // Get main categories (where sub_menu is null or 0)
+        const mainCategories = (res?.gridData ?? [])
+          .filter((item: any) => !item.sub_menu || item.sub_menu === 0)
+          .map((item: any) => ({
+            ...item,
+            hasSubcategories: false // Will be updated in next step
+          }));
+        
+        // Check which main categories have subcategories
+        const categoriesWithSubs = new Set<number>();
+        (res?.gridData ?? []).forEach((item: any) => {
+          if (item.sub_menu && item.sub_menu !== 0) {
+            categoriesWithSubs.add(item.sub_menu);
+          }
+        });
+
+        // Update hasSubcategories flag
+        const processedCategories = mainCategories.map((cat: any) => ({
+          ...cat,
+          hasSubcategories: categoriesWithSubs.has(cat.sort_menu || cat.id)
+        }));
+
+        this.items.set(processedCategories);
         this.loaded.set(true);
       },
       error: () => {
         this.error.set(true);
         this.loaded.set(true);
+      }
+    });
+  }
+
+  onItemClick(item: Category): void {
+    if (item.hasSubcategories) {
+      this.loadSubcategories(item);
+    } else {
+      this.navigateToBooks(item);
+    }
+  }
+
+  private loadSubcategories(parentItem: Category): void {
+    this.loaded.set(false);
+    
+    // Save current state to navigation stack
+    this.navigationStack.push({
+      id: this.currentLevel() || 0,
+      name: 'الرئيسية',
+      items: this.items()
+    });
+    
+    // Update breadcrumbs
+    this.breadcrumbs.update(crumbs => [
+      ...crumbs,
+      { id: parentItem.id, name: parentItem.name }
+    ]);
+    
+    // Load subcategories
+    this.api.search().subscribe({
+      next: res => {
+        const subcategories = (res?.gridData ?? [])
+          .filter((item: any) => item.sub_menu === parentItem.sort_menu)
+          .map((item: any) => ({
+            ...item,
+            // Check if this item has its own subcategories
+            hasSubcategories: (res?.gridData ?? []).some(
+              (subItem: any) => subItem.sub_menu === item.sort_menu
+            )
+          }));
+
+        if (subcategories.length > 0) {
+          this.currentLevel.set(parentItem.id);
+          this.items.set(subcategories);
+        } else {
+          // If no subcategories, navigate to books
+          this.navigateToBooks(parentItem);
+          return;
+        }
+        
+        this.loaded.set(true);
+      },
+      error: () => {
+        this.error.set(true);
+        this.loaded.set(true);
+      }
+    });
+  }
+
+  goToLevel(levelId?: number): void {
+    if (!levelId) {
+      // Go to root
+      this.currentLevel.set(null);
+      this.breadcrumbs.set([]);
+      this.loadMainCategories();
+      this.navigationStack = [];
+      return;
+    }
+
+    // Find the level in the navigation stack
+    const levelIndex = this.navigationStack.findIndex(item => item.id === levelId);
+    if (levelIndex !== -1) {
+      // Go back to the selected level
+      const targetLevel = this.navigationStack[levelIndex];
+      this.items.set(targetLevel.items);
+      this.currentLevel.set(levelId);
+      this.breadcrumbs.update(crumbs => crumbs.slice(0, levelIndex + 1));
+      this.navigationStack = this.navigationStack.slice(0, levelIndex);
+    }
+  }
+
+  private navigateToBooks(item: Category): void {
+    this.router.navigate(['/books', item.id], { 
+      queryParams: { 
+        name: item.name,
+        from: this.currentLevel() ? 'subcategory' : 'category'
       }
     });
   }
